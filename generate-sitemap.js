@@ -1,91 +1,101 @@
 const fs = require("fs");
 const fetch = require("node-fetch");
 
-const API_TOKEN = process.env.WEBFLOW_API_TOKEN;
-const SITE_ID = process.env.WEBFLOW_SITE_ID; // from Webflow project settings
-const DOMAIN = process.env.SITE_DOMAIN; // e.g. example.com
+const API_TOKEN = process.env.WEBFLOW_API_TOKEN; // token with pages:read, cms:read
+const SITE_ID   = process.env.WEBFLOW_SITE_ID;   // this site’s ID
+const DOMAIN    = process.env.SITE_DOMAIN;       // e.g. exoshield.com
 
 async function fetchJSON(url) {
   const res = await fetch(url, {
-    headers: {
-      "Authorization": `Bearer ${API_TOKEN}`,
-      "accept-version": "1.0.0"
-    }
+    headers: { Authorization: `Bearer ${API_TOKEN}` } // v2 uses Bearer only
   });
   if (!res.ok) throw new Error(`Error fetching ${url}: ${res.status} ${res.statusText}`);
   return res.json();
 }
 
-async function getPages() {
-  const data = await fetchJSON(`https://api.webflow.com/sites/${SITE_ID}/pages`);
-  return data.filter(p => !p.slug.startsWith("_")); // skip hidden
-}
-
-async function getCollections() {
-  return fetchJSON(`https://api.webflow.com/sites/${SITE_ID}/collections`);
-}
-
-async function getAllItems(collectionId) {
-  let items = [];
-  let offset = 0;
-  const limit = 100;
-
+// v2: /v2/sites/:siteId/pages  -> { pages: [...] }
+async function getPages(siteId) {
+  const out = [];
+  let offset = 0, limit = 100;
   while (true) {
-    const data = await fetchJSON(
-      `https://api.webflow.com/collections/${collectionId}/items?offset=${offset}&limit=${limit}`
-    );
-    items = items.concat(data.items);
-    if (!data.items || data.items.length < limit) break;
+    const data = await fetchJSON(`https://api.webflow.com/v2/sites/${siteId}/pages?limit=${limit}&offset=${offset}`);
+    const pages = data.pages || [];
+    out.push(...pages);
+    if (pages.length < limit) break;
+    offset += limit;
+  }
+  return out;
+}
+
+// v2: /v2/sites/:siteId/collections -> { collections: [...] }
+async function getCollections(siteId) {
+  const data = await fetchJSON(`https://api.webflow.com/v2/sites/${siteId}/collections`);
+  return data.collections || [];
+}
+
+// v2: /v2/collections/:collectionId/items -> { items: [...] }
+async function getAllItems(collectionId) {
+  const items = [];
+  let offset = 0, limit = 100;
+  while (true) {
+    const data = await fetchJSON(`https://api.webflow.com/v2/collections/${collectionId}/items?limit=${limit}&offset=${offset}`);
+    const batch = data.items || [];
+    items.push(...batch);
+    if (batch.length < limit) break;
     offset += limit;
   }
   return items;
 }
 
-function buildURL(loc, lastmod, priority = "0.8") {
-  return `
-  <url>
+function urlTag(loc, lastmod, priority = "0.8") {
+  return `  <url>
     <loc>${loc}</loc>
-    <lastmod>${new Date(lastmod).toISOString()}</lastmod>
+    <lastmod>${new Date(lastmod || Date.now()).toISOString()}</lastmod>
     <priority>${priority}</priority>
   </url>`;
 }
 
 (async () => {
   try {
-    let urls = [];
+    const tags = [];
 
-    // Static Pages
-    const pages = await getPages();
+    // ----- Static pages -----
+    const pages = await getPages(SITE_ID); // requires pages:read scope
     for (const p of pages) {
-      const slug = p.slug === "" ? "" : `${p.slug}`;
-      const loc = `https://${DOMAIN}/${slug}`;
-      const lastmod = p.lastPublished || p.updatedOn || new Date();
-      const priority = slug === "" ? "1.0" : "0.8";
-      urls.push(buildURL(loc, lastmod, priority));
+      if (p.archived || p.draft) continue;
+      // v2 provides a ready path for the published page
+      const path = p.publishedPath || (p.slug ? `/${p.slug}` : "/");
+      const loc  = `https://${DOMAIN}${path}`;
+      const last = p.lastUpdated || p.createdOn;
+      const prio = path === "/" ? "1.0" : "0.8";
+      tags.push(urlTag(loc, last, prio));
     }
 
-    // CMS Items
-    const collections = await getCollections();
+    // ----- CMS items -----
+    const collections = await getCollections(SITE_ID); // requires cms:read scope
     for (const col of collections) {
-      const items = await getAllItems(col._id);
+      const base = col.slug || ""; // collection base path
+      const items = await getAllItems(col.id);
       for (const item of items) {
-        if (item.isArchived || item.isDraft) continue; // skip unpublished
-        const loc = `https://${DOMAIN}/${item.slug}`;
-        const lastmod = item.lastPublished || item.updatedOn || new Date();
-        urls.push(buildURL(loc, lastmod, "0.7"));
+        if (item.isDraft || item.isArchived) continue;
+        const slug = item.fieldData?.slug;
+        if (!slug) continue;
+        // Build /collection-slug/item-slug
+        const loc  = `https://${DOMAIN}/${base}/${slug}`.replace(/\/+/g, "/").replace(":/", "://");
+        const last = item.lastPublished || item.lastUpdated || item.createdOn;
+        tags.push(urlTag(loc, last, "0.7"));
       }
     }
 
-    // Build XML
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${urls.join("\n")}
-</urlset>`;
-
+${tags.join("\n")}
+</urlset>
+`;
     fs.writeFileSync("sitemap.xml", xml, "utf8");
-    console.log("✅ Sitemap generated with pages + CMS items.");
+    console.log(`✅ Sitemap generated with ${tags.length} URLs`);
   } catch (err) {
-    console.error(err);
+    console.error("❌ Generation failed:", err.message);
     process.exit(1);
   }
 })();
