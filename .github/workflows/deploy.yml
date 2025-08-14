@@ -1,4 +1,4 @@
-name: Generate & Deploy Sitemap (GitHub Pages)
+name: Generate, Deploy & Compare Sitemaps
 
 on:
   workflow_dispatch:
@@ -13,6 +13,10 @@ permissions:
 concurrency:
   group: "pages"
   cancel-in-progress: true
+
+env:
+  GH_SITEMAP_URL: https://humantheory.github.io/exoshield-custom-sitemap/sitemap.xml
+  WF_SITEMAP_URL: https://getexoshield.com/sitemap.xml
 
 jobs:
   build:
@@ -32,6 +36,8 @@ jobs:
           npm run generate
           mkdir -p dist
           cp sitemap.xml dist/sitemap.xml
+          # Optional: avoid base URL 404 on Pages
+          printf 'OK' > dist/index.html
         env:
           WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
           WEBFLOW_SITE_ID:   ${{ secrets.WEBFLOW_SITE_ID }}
@@ -45,5 +51,91 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/deploy-pages@v4
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  compare:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prep
+        run: mkdir -p report
+
+      - name: Fetch GitHub sitemap
+        run: curl -sSL "$GH_SITEMAP_URL" -o report/github.xml
+
+      - name: Fetch Webflow sitemap
+        run: curl -sSL "$WF_SITEMAP_URL" -o report/webflow.xml
+
+      - name: Extract URL lists + counts + diff
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils
+          # Extract URL sets
+          xmllint --xpath "//url/loc/text()" report/github.xml  | tr ' ' '\n' | sort -u > report/gh.txt || true
+          xmllint --xpath "//url/loc/text()" report/webflow.xml | tr ' ' '\n' | sort -u > report/wf.txt || true
+
+          GH_COUNT=$(wc -l < report/gh.txt || echo 0)
+          WF_COUNT=$(wc -l < report/wf.txt || echo 0)
+
+          # Diffs
+          comm -23 report/gh.txt report/wf.txt > report/in_gh_not_wf.txt || true
+          comm -13 report/gh.txt report/wf.txt > report/in_wf_not_gh.txt || true
+
+          GH_NOT_WF=$(wc -l < report/in_gh_not_wf.txt || echo 0)
+          WF_NOT_GH=$(wc -l < report/in_wf_not_gh.txt || echo 0)
+
+          {
+            echo "GitHub sitemap: $GH_SITEMAP_URL"
+            echo "Webflow sitemap: $WF_SITEMAP_URL"
+            echo
+            echo "GitHub URL count:  $GH_COUNT"
+            echo "Webflow URL count: $WF_COUNT"
+            echo
+            echo "--- In GitHub but NOT in Webflow ($GH_NOT_WF) ---"
+            head -n 50 report/in_gh_not_wf.txt || true
+            [ "$GH_NOT_WF" -gt 50 ] && echo "... (+$((GH_NOT_WF-50)) more)"
+            echo
+            echo "--- In Webflow but NOT in GitHub ($WF_NOT_GH) ---"
+            head -n 50 report/in_wf_not_gh.txt || true
+            [ "$WF_NOT_GH" -gt 50 ] && echo "... (+$((WF_NOT_GH-50)) more)"
+            echo
+            echo "Tag check:"
+            echo -n "  GH has <lastmod>/<priority>? "; (grep -q -E "<lastmod>|<priority>" report/github.xml && echo "yes") || echo "no"
+            echo -n "  WF has <lastmod>/<priority>? "; (grep -q -E "<lastmod>|<priority>" report/webflow.xml && echo "yes") || echo "no"
+          } | tee report/summary.txt
+
+      - name: Upload comparison report (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sitemap-comparison
+          path: |
+            report/summary.txt
+            report/gh.txt
+            report/wf.txt
+            report/in_gh_not_wf.txt
+            report/in_wf_not_gh.txt
+
+      # OPTIONAL: Email the report if SMTP secrets are set
+      - name: Email comparison report
+        if: ${{ secrets.SMTP_SERVER && secrets.SMTP_PORT && secrets.SMTP_USERNAME && secrets.SMTP_PASSWORD && secrets.SMTP_TO }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}    # e.g. smtp.gmail.com
+          server_port: ${{ secrets.SMTP_PORT }}         # e.g. 465
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "Sitemap Comparison Report"
+          to: ${{ secrets.SMTP_TO }}                    # comma-separated for multiple
+          from: Sitemap Bot <${{ secrets.SMTP_FROM || secrets.SMTP_USERNAME }}>
+          secure: true
+          body: |
+            $(cat report/summary.txt)
+          attachments: |
+            report/summary.txt,
+            report/in_gh_not_wf.txt,
+            report/in_wf_not_gh.txt
