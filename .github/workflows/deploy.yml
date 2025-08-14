@@ -1,9 +1,9 @@
-name: Generate & Deploy Sitemap (Diagnostics)
+name: Generate & Deploy Sitemap (GitHub Pages)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 3 * * *"   # daily at 03:00 UTC
 
 permissions:
   contents: read
@@ -19,40 +19,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: "18" }
 
-      - run: npm ci || npm i
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install deps
+        run: npm ci || npm i
 
       - name: Generate sitemap
         run: |
-          set -e
           npm run generate
-          # Ensure output folder
           mkdir -p dist
-          cp sitemap.xml dist/sitemap.xml || true
-
-          echo "----- DIAGNOSTICS -----"
-          if [ -f sitemap.xml ]; then
-            echo "sitemap.xml size:"
-            wc -c sitemap.xml || true
-            echo "First 20 lines:"
-            head -n 20 sitemap.xml || true
-          else
-            echo "sitemap.xml not found in repo root"
-          fi
-
-          # Hard fail if the file is tiny (likely empty XML)
-          BYTES=$(wc -c < dist/sitemap.xml 2>/dev/null || echo 0)
-          if [ "$BYTES" -lt 50 ]; then
-            echo "ERROR: dist/sitemap.xml appears empty ($BYTES bytes)."
-            echo "Tip: check WEBFLOW_SITE_ID, token scopes (Pages: Read, CMS: Read), and API endpoint URLs."
-            exit 1
-          fi
+          cp sitemap.xml dist/sitemap.xml
         env:
           WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
           WEBFLOW_SITE_ID:   ${{ secrets.WEBFLOW_SITE_ID }}
-          SITE_DOMAIN:       yourdomain.com
+          SITE_DOMAIN:       ${{ secrets.SITE_DOMAIN }}   # e.g. exoshield.com
 
       - name: Upload artifact for Pages
         uses: actions/upload-pages-artifact@v3
