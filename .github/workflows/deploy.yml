@@ -1,4 +1,4 @@
-name: Generate & Deploy Sitemap (GitHub Pages)
+name: Generate & Deploy Sitemap (Diagnostics)
 
 on:
   workflow_dispatch:
@@ -21,17 +21,40 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "18" }
+
       - run: npm ci || npm i
+
       - name: Generate sitemap
         run: |
+          set -e
           npm run generate
+          # Ensure output folder
           mkdir -p dist
-          cp sitemap.xml dist/sitemap.xml
+          cp sitemap.xml dist/sitemap.xml || true
+
+          echo "----- DIAGNOSTICS -----"
+          if [ -f sitemap.xml ]; then
+            echo "sitemap.xml size:"
+            wc -c sitemap.xml || true
+            echo "First 20 lines:"
+            head -n 20 sitemap.xml || true
+          else
+            echo "sitemap.xml not found in repo root"
+          fi
+
+          # Hard fail if the file is tiny (likely empty XML)
+          BYTES=$(wc -c < dist/sitemap.xml 2>/dev/null || echo 0)
+          if [ "$BYTES" -lt 50 ]; then
+            echo "ERROR: dist/sitemap.xml appears empty ($BYTES bytes)."
+            echo "Tip: check WEBFLOW_SITE_ID, token scopes (Pages: Read, CMS: Read), and API endpoint URLs."
+            exit 1
+          fi
         env:
           WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
           WEBFLOW_SITE_ID:   ${{ secrets.WEBFLOW_SITE_ID }}
           SITE_DOMAIN:       yourdomain.com
-      - name: Upload artifact
+
+      - name: Upload artifact for Pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
