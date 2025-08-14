@@ -1,0 +1,10 @@
+{
+  "name": "custom-sitemap",
+  "version": "1.0.0",
+  "scripts": {
+    "generate": "node generate-sitemap.js"
+  },
+  "dependencies": {
+    "node-fetch": "^2.6.7"
+  }
+}
